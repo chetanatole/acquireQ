@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+python-socketio
+sqlalchemy
+aiosqlite
+pydantic

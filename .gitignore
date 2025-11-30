@@ -1,0 +1,9 @@
+*.db
+__pycache__/
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+vite.config.ts.timestamp*
+test
