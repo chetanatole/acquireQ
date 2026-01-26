@@ -15,6 +15,7 @@ class Resource(Base):
     admin_secret = Column(String, nullable=False)
     current_holder_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     active_offer_expires_at = Column(DateTime, nullable=True)
+    last_activity_at = Column(DateTime, default=datetime.utcnow)
 
     users = relationship("User", back_populates="resource", foreign_keys="[User.resource_id]")
     queue_items = relationship("QueueItem", back_populates="resource", order_by="QueueItem.order")

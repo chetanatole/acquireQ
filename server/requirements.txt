@@ -4,3 +4,4 @@ python-socketio
 sqlalchemy
 aiosqlite
 pydantic
+aiosmtplib

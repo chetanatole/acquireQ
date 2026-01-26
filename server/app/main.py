@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -6,6 +7,10 @@ import socketio
 from .database import init_db, AsyncSessionLocal
 from .models import Resource
 from .queue_manager import QueueManager
+
+# Cleanup configuration
+CLEANUP_INTERVAL_HOURS = 1  # Run cleanup every hour
+INACTIVE_THRESHOLD_HOURS = 24  # Delete resources inactive for 24 hours
 
 # FastAPI Setup
 app = FastAPI(title="acquireQ")
@@ -35,11 +40,24 @@ class CreateResourceResponse(BaseModel):
     id: str
     adminSecret: str
 
+async def cleanup_task():
+    """Background task to periodically clean up inactive resources"""
+    while True:
+        await asyncio.sleep(CLEANUP_INTERVAL_HOURS * 3600)  # Wait interval
+        try:
+            count = await queue_manager.cleanup_inactive_resources(INACTIVE_THRESHOLD_HOURS)
+            if count > 0:
+                print(f"Cleanup task: removed {count} inactive resource(s)")
+        except Exception as e:
+            print(f"Cleanup task error: {e}")
+
 # Events
 @app.on_event("startup")
 async def startup_event():
     await init_db()
     await queue_manager.restore_timers()
+    # Start background cleanup task
+    asyncio.create_task(cleanup_task())
 
 
 @app.post("/api/resources", response_model=CreateResourceResponse)
