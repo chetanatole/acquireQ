@@ -14,9 +14,11 @@ interface ResourceState {
   name: string;
   description: string | null;
   timeoutSeconds: number;
+  maxHoldSeconds: number | null;
   holder: User | null;
   queue: User[];
   offerExpiresAt: string | null;
+  holdExpiresAt: string | null;
 }
 
 // Icons
@@ -133,6 +135,7 @@ export default function Resource() {
   const [joinEmail, setJoinEmail] = useState('');
   const [showJoin, setShowJoin] = useState(false);
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
+  const [holdTimeLeft, setHoldTimeLeft] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -205,6 +208,25 @@ export default function Resource() {
     const interval = setInterval(updateTimer, 1000);
     return () => clearInterval(interval);
   }, [state?.offerExpiresAt]);
+
+  // Hold timer effect
+  useEffect(() => {
+    if (!state?.holdExpiresAt) {
+      setHoldTimeLeft(null);
+      return;
+    }
+
+    const updateHoldTimer = () => {
+      const now = new Date().getTime();
+      const expiry = new Date(state.holdExpiresAt!).getTime();
+      const diff = Math.max(0, Math.ceil((expiry - now) / 1000));
+      setHoldTimeLeft(diff);
+    };
+
+    updateHoldTimer();
+    const interval = setInterval(updateHoldTimer, 1000);
+    return () => clearInterval(interval);
+  }, [state?.holdExpiresAt]);
 
   const copyLink = async () => {
     await navigator.clipboard.writeText(window.location.href);
@@ -355,7 +377,16 @@ export default function Resource() {
                   <h3 className="text-2xl font-bold text-white mb-1">
                     {state.holder.displayName}
                   </h3>
-                  <p className="text-sm text-gray-500 mb-6">Currently using the resource</p>
+                  <p className="text-sm text-gray-500 mb-2">Currently using the resource</p>
+
+                  {holdTimeLeft !== null && (
+                    <div className="flex items-center gap-2 mb-4 text-sm">
+                      <ClockIcon />
+                      <span className={`font-mono ${holdTimeLeft <= 30 ? 'text-danger-400' : 'text-warning-400'}`}>
+                        {Math.floor(holdTimeLeft / 60)}:{(holdTimeLeft % 60).toString().padStart(2, '0')} remaining
+                      </span>
+                    </div>
+                  )}
 
                   {isHolder && (
                     <button

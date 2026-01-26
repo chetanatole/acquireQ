@@ -24,7 +24,8 @@ APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5173")
 class QueueManager:
     def __init__(self, sio):
         self.sio = sio
-        self.offer_tasks = {} # resource_id -> asyncio.Task
+        self.offer_tasks = {}  # resource_id -> asyncio.Task for offer timeouts
+        self.hold_tasks = {}   # resource_id -> asyncio.Task for hold timeouts
 
     async def _send_turn_email(self, user_email: str, resource_name: str, resource_id: str, timeout_seconds: int):
         """Send email notification when it's the user's turn"""
@@ -96,9 +97,11 @@ class QueueManager:
             "name": resource.name,
             "description": resource.description,
             "timeoutSeconds": resource.timeout_seconds,
+            "maxHoldSeconds": resource.max_hold_seconds,
             "holder": holder,
             "queue": queue,
-            "offerExpiresAt": (resource.active_offer_expires_at.isoformat() + "Z") if resource.active_offer_expires_at else None
+            "offerExpiresAt": (resource.active_offer_expires_at.isoformat() + "Z") if resource.active_offer_expires_at else None,
+            "holdExpiresAt": (resource.hold_expires_at.isoformat() + "Z") if resource.hold_expires_at else None
         }
 
     async def broadcast_update(self, resource_id: str):
@@ -167,9 +170,15 @@ class QueueManager:
                 return False
 
             resource.current_holder_id = None
+            resource.hold_expires_at = None
             await self._update_activity(resource_id, db)
             await db.commit()
-            
+
+        # Cancel hold timer if exists
+        if resource_id in self.hold_tasks:
+            self.hold_tasks[resource_id].cancel()
+            del self.hold_tasks[resource_id]
+
         await self.broadcast_update(resource_id)
         await self._process_queue(resource_id)
         return True
@@ -209,10 +218,16 @@ class QueueManager:
                 if queue_size == 1 and allow_auto_accept:
                     print(f"Only one person in queue, auto-accepting user {next_item.user_id}")
                     resource.current_holder_id = next_item.user_id
+                    # Set hold expiration if max_hold_seconds is configured
+                    if resource.max_hold_seconds:
+                        resource.hold_expires_at = datetime.utcnow() + timedelta(seconds=resource.max_hold_seconds)
                     await db.delete(next_item)
                     await self._update_activity(resource_id, db)
                     await db.commit()
                     await self.broadcast_update(resource_id)
+                    # Start hold timer if configured
+                    if resource.max_hold_seconds:
+                        self._start_hold_timer(resource_id, resource.max_hold_seconds)
                     return
 
                 # Offer to next user with timeout
@@ -276,6 +291,38 @@ class QueueManager:
         await self.broadcast_update(resource_id)
         await self._process_queue(resource_id)  # Offer to next
 
+    def _start_hold_timer(self, resource_id: str, duration: int):
+        """Start a timer to auto-release the resource after max hold time"""
+        # Cancel existing hold timer if any
+        if resource_id in self.hold_tasks:
+            self.hold_tasks[resource_id].cancel()
+
+        self.hold_tasks[resource_id] = asyncio.create_task(
+            self._handle_hold_timeout(resource_id, duration)
+        )
+        print(f"Started hold timer for resource {resource_id}: {duration}s")
+
+    async def _handle_hold_timeout(self, resource_id: str, duration: int):
+        """Handle timeout when holder exceeds max hold time"""
+        await asyncio.sleep(duration)
+        async with AsyncSessionLocal() as db:
+            resource = await db.get(Resource, resource_id)
+            if not resource or not resource.current_holder_id:
+                return  # No longer held
+
+            print(f"Hold timeout for resource {resource_id}, auto-releasing from user {resource.current_holder_id}")
+            resource.current_holder_id = None
+            resource.hold_expires_at = None
+            await self._update_activity(resource_id, db)
+            await db.commit()
+
+        # Clean up task reference
+        if resource_id in self.hold_tasks:
+            del self.hold_tasks[resource_id]
+
+        await self.broadcast_update(resource_id)
+        await self._process_queue(resource_id)  # Offer to next in queue
+
     async def accept_offer(self, resource_id: str, user_id: int):
         async with AsyncSessionLocal() as db:
             resource = await db.get(Resource, resource_id)
@@ -295,6 +342,10 @@ class QueueManager:
             # Make holder
             resource.current_holder_id = user_id
             resource.active_offer_expires_at = None
+            # Set hold expiration if max_hold_seconds is configured
+            max_hold = resource.max_hold_seconds
+            if max_hold:
+                resource.hold_expires_at = datetime.utcnow() + timedelta(seconds=max_hold)
 
             # Remove from queue
             await db.delete(first_item)
@@ -304,6 +355,10 @@ class QueueManager:
             # Cancel timeout task
             if resource_id in self.offer_tasks:
                 self.offer_tasks[resource_id].cancel()
+
+        # Start hold timer if configured
+        if max_hold:
+            self._start_hold_timer(resource_id, max_hold)
 
         await self.broadcast_update(resource_id)
         return True
@@ -386,22 +441,41 @@ class QueueManager:
 
     async def restore_timers(self):
         async with AsyncSessionLocal() as db:
+            now = datetime.utcnow()
+
+            # Restore offer timers
             result = await db.execute(
-                select(Resource).where(Resource.active_offer_expires_at > datetime.utcnow())
+                select(Resource).where(Resource.active_offer_expires_at > now)
             )
             resources = result.scalars().all()
 
             for resource in resources:
-                remaining = (resource.active_offer_expires_at - datetime.utcnow()).total_seconds()
+                remaining = (resource.active_offer_expires_at - now).total_seconds()
                 if remaining > 0:
-                    print(f"Restoring timer for resource {resource.id}, remaining: {remaining}s")
+                    print(f"Restoring offer timer for resource {resource.id}, remaining: {remaining}s")
                     self.offer_tasks[resource.id] = asyncio.create_task(
                         self._handle_timeout(resource.id, remaining)
                     )
                 else:
-                    # Already expired while down? Handle it immediately
-                    print(f"Timer expired while down for resource {resource.id}")
+                    print(f"Offer timer expired while down for resource {resource.id}")
                     asyncio.create_task(self._handle_timeout(resource.id, 0))
+
+            # Restore hold timers
+            result = await db.execute(
+                select(Resource).where(Resource.hold_expires_at > now)
+            )
+            resources_with_hold = result.scalars().all()
+
+            for resource in resources_with_hold:
+                remaining = (resource.hold_expires_at - now).total_seconds()
+                if remaining > 0:
+                    print(f"Restoring hold timer for resource {resource.id}, remaining: {remaining}s")
+                    self.hold_tasks[resource.id] = asyncio.create_task(
+                        self._handle_hold_timeout(resource.id, remaining)
+                    )
+                else:
+                    print(f"Hold timer expired while down for resource {resource.id}")
+                    asyncio.create_task(self._handle_hold_timeout(resource.id, 0))
 
     async def _update_activity(self, resource_id: str, db):
         """Update last_activity_at timestamp for a resource"""
@@ -425,10 +499,15 @@ class QueueManager:
             for resource in inactive_resources:
                 print(f"Cleaning up inactive resource: {resource.id} ({resource.name})")
 
-                # Cancel any active timeout task
+                # Cancel any active offer timeout task
                 if resource.id in self.offer_tasks:
                     self.offer_tasks[resource.id].cancel()
                     del self.offer_tasks[resource.id]
+
+                # Cancel any active hold timeout task
+                if resource.id in self.hold_tasks:
+                    self.hold_tasks[resource.id].cancel()
+                    del self.hold_tasks[resource.id]
 
                 # Delete queue items
                 await db.execute(

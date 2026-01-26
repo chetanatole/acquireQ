@@ -35,6 +35,7 @@ class CreateResourceRequest(BaseModel):
     name: str
     description: str = None
     timeoutSeconds: int = 60
+    maxHoldSeconds: int = None  # None = unlimited
 
 class CreateResourceResponse(BaseModel):
     id: str
@@ -71,6 +72,7 @@ async def create_resource(req: CreateResourceRequest):
             name=req.name,
             description=req.description,
             timeout_seconds=req.timeoutSeconds,
+            max_hold_seconds=req.maxHoldSeconds,
             admin_secret=admin_secret
         )
         db.add(resource)

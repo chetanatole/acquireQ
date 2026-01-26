@@ -12,9 +12,11 @@ class Resource(Base):
     name = Column(String, nullable=False)
     description = Column(String, nullable=True)
     timeout_seconds = Column(Integer, default=60)
+    max_hold_seconds = Column(Integer, nullable=True)  # None = unlimited
     admin_secret = Column(String, nullable=False)
     current_holder_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     active_offer_expires_at = Column(DateTime, nullable=True)
+    hold_expires_at = Column(DateTime, nullable=True)  # When current holder must release
     last_activity_at = Column(DateTime, default=datetime.utcnow)
 
     users = relationship("User", back_populates="resource", foreign_keys="[User.resource_id]")
